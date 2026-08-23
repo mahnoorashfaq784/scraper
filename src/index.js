@@ -1,22 +1,30 @@
 const fs = require("fs");
 const path = require("path");
+const cheerio = require("cheerio");
 
-const URL = "https://books.toscrape.com/";
+const BASE_URL = "https://books.toscrape.com/";
 const CACHE_DIR = path.join(__dirname, "..", "cache");
-const CACHE_FILE = path.join(CACHE_DIR, "catalogue-page-1.html");
 
-async function fetchPage() {
+function getCacheFile(pageNumber) {
+    return path.join(
+        CACHE_DIR,
+        `catalogue-page-${pageNumber}.html`
+    );
+}
 
-    if (fs.existsSync(CACHE_FILE)) {
-        const html = fs.readFileSync(CACHE_FILE, "utf8");
+async function fetchPage(url, pageNumber) {
+    const cacheFile = getCacheFile(pageNumber);
 
-        console.log("CACHE HIT");
-        console.log(`Response size: ${Buffer.byteLength(html, "utf8")} bytes`);
+    // Use cached page if available
+    if (fs.existsSync(cacheFile)) {
+        const html = fs.readFileSync(cacheFile, "utf8");
+
+        console.log(`CACHE HIT: catalogue page ${pageNumber}`);
 
         return html;
     }
 
-    console.log("FETCH");
+    console.log(`FETCH: catalogue page ${pageNumber}`);
 
     const controller = new AbortController();
 
@@ -25,23 +33,24 @@ async function fetchPage() {
     }, 5000);
 
     try {
-        const response = await fetch(URL, {
+        const response = await fetch(url, {
             signal: controller.signal,
             headers: {
-                "User-Agent": "FlyRankInternship-A9/1.0 (+https://github.com/)"
+                "User-Agent":
+                    "FlyRankInternship-A9/1.0 (+https://github.com/)"
             }
         });
 
         if (response.status !== 200) {
-            throw new Error(`Fetch failed with status ${response.status}`);
+            throw new Error(
+                `Fetch failed with status ${response.status}`
+            );
         }
 
         const html = await response.text();
 
         fs.mkdirSync(CACHE_DIR, { recursive: true });
-        fs.writeFileSync(CACHE_FILE, html);
-
-        console.log(`Response size: ${Buffer.byteLength(html, "utf8")} bytes`);
+        fs.writeFileSync(cacheFile, html);
 
         return html;
     } finally {
@@ -49,7 +58,63 @@ async function fetchPage() {
     }
 }
 
-fetchPage().catch((error) => {
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function discoverBooks() {
+    let currentUrl = BASE_URL;
+    let cataloguePage = 1;
+
+    const allBookUrls = [];
+
+    while (cataloguePage <= 3) {
+        const html = await fetchPage(
+            currentUrl,
+            cataloguePage
+        );
+
+        const $ = cheerio.load(html);
+
+        // Find every book link on this catalogue page
+        $("article.product_pod h3 a").each((index, element) => {
+            const href = $(element).attr("href");
+
+            if (href) {
+                const absoluteUrl = new URL(
+                    href,
+                    currentUrl
+                ).href;
+
+                allBookUrls.push(absoluteUrl);
+            }
+        });
+
+        // Find the catalogue's next page
+        const nextHref = $("li.next a").attr("href");
+
+        if (!nextHref || cataloguePage === 3) {
+            break;
+        }
+
+        await sleep(500);
+
+        currentUrl = new URL(
+            nextHref,
+            currentUrl
+        ).href;
+
+    cataloguePage++;
+    }
+
+    const uniqueUrls = [...new Set(allBookUrls)];
+
+    console.log(`catalogue_pages=${cataloguePage}`);
+    console.log(`discovered=${allBookUrls.length}`);
+    console.log(`unique_urls=${uniqueUrls.length}`);
+}
+
+discoverBooks().catch((error) => {
     console.error("ERROR:", error.message);
     process.exit(1);
 });
