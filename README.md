@@ -216,10 +216,6 @@ A real run produces a report similar to:
 }
 ```
 
-Replace the values above with the contents of your actual `output/run-report.json` before submitting.
-
-The exact timestamps, duration, and cache statistics vary between runs.
-
 ---
 
 ## Why No Browser?
