@@ -1,9 +1,22 @@
 const fs = require("fs");
 const path = require("path");
 const cheerio = require("cheerio");
+const { z } = require("zod");
 
 const BASE_URL = "https://books.toscrape.com/";
 const CACHE_DIR = path.join(__dirname, "..", "cache");
+
+const bookSchema = z.object({
+    title: z.string().min(1),
+    product_url: z.string().url().startsWith("https://"),
+    price_text: z.string().min(1),
+    price_gbp: z.number(),
+    availability_text: z.string().min(1),
+    rating_text: z.string().min(1),
+    description: z.string().nullable(),
+    source_page: z.string().url(),
+    fetched_at: z.string().datetime()
+});
 
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -113,6 +126,20 @@ async function discoverBooks() {
     };
 }
 
+function normalizePrice(priceText) {
+    if (!priceText) {
+        return null;
+    }
+
+    const cleaned = priceText
+        .replace("£", "")
+        .trim();
+
+    const price = Number(cleaned);
+
+    return Number.isFinite(price) ? price : null;
+}
+
 async function extractBook(url, sourcePage, index) {
     const cacheName = `book-${index + 1}.html`;
 
@@ -120,13 +147,16 @@ async function extractBook(url, sourcePage, index) {
 
     const $ = cheerio.load(html);
 
-    const title = $("div.product_main h1").text().trim() || null;
+    const title =
+        $("div.product_main h1").text().trim() || null;
 
     const priceText =
         $("div.product_main .price_color")
             .first()
             .text()
             .trim() || null;
+
+    const priceGbp = normalizePrice(priceText);
 
     const availabilityText =
         $("div.product_main .availability")
@@ -150,6 +180,7 @@ async function extractBook(url, sourcePage, index) {
         title,
         product_url: url,
         price_text: priceText,
+        price_gbp: priceGbp,
         availability_text: availabilityText,
         rating_text: ratingText,
         description,
@@ -162,6 +193,7 @@ async function main() {
     const { uniqueUrls, sourcePages } = await discoverBooks();
 
     const records = [];
+    const errors = [];
 
     for (let i = 0; i < uniqueUrls.length; i++) {
         const url = uniqueUrls[i];
@@ -173,22 +205,55 @@ async function main() {
                 i
             );
 
-            records.push(record);
+            const result = bookSchema.safeParse(record);
+
+            if (result.success) {
+                records.push(result.data);
+            } else {
+                console.error(`INVALID: ${url}`);
+
+                errors.push({
+                    record,
+                    errors: result.error.issues
+                });
+            }
 
             if (i < uniqueUrls.length - 1) {
                 await sleep(500);
             }
+
         } catch (error) {
             console.error(
                 `FAILED: ${url} - ${error.message}`
             );
+
+            errors.push({
+                url,
+                errors: [error.message]
+            });
         }
     }
 
-    console.log(`detail_pages=${records.length}`);
+    const outputDir = path.join(
+        __dirname,
+        "..",
+        "output"
+    );
 
-    console.log("\nFirst raw record:");
-    console.log(JSON.stringify(records[0], null, 2));
+    fs.mkdirSync(outputDir, { recursive: true });
+
+    fs.writeFileSync(
+        path.join(outputDir, "books.json"),
+        JSON.stringify(records, null, 2)
+    );
+
+    fs.writeFileSync(
+        path.join(outputDir, "errors.json"),
+        JSON.stringify(errors, null, 2)
+    );
+
+    console.log(`valid_records=${records.length}`);
+    console.log(`invalid_records=${errors.length}`);
 }
 
 main().catch(error => {
