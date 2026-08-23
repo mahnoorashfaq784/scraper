@@ -26,12 +26,16 @@ function getCacheFile(name) {
     return path.join(CACHE_DIR, name);
 }
 
-async function fetchPage(url, cacheName) {
+async function fetchPage(url, cacheName, stats) {
     const cacheFile = getCacheFile(cacheName);
 
     if (fs.existsSync(cacheFile)) {
         const html = fs.readFileSync(cacheFile, "utf8");
+
+        stats.cacheHits++;
+
         console.log(`CACHE HIT: ${cacheName}`);
+
         return html;
     }
 
@@ -53,23 +57,52 @@ async function fetchPage(url, cacheName) {
         });
 
         if (response.status !== 200) {
-            throw new Error(
+            const error = new Error(
                 `Fetch failed with status ${response.status}`
             );
+
+            error.status = response.status;
+
+            throw error;
         }
 
         const html = await response.text();
+
+        stats.pagesFetched++;
 
         fs.mkdirSync(CACHE_DIR, { recursive: true });
         fs.writeFileSync(cacheFile, html);
 
         return html;
+
     } finally {
         clearTimeout(timeout);
     }
 }
 
-async function discoverBooks() {
+async function fetchWithRetry(url, cacheName, stats) {
+    try {
+        return await fetchPage(url, cacheName, stats);
+
+    } catch (error) {
+
+        // Retry only timeout or server errors (5xx)
+        if (error.name === "AbortError" ||
+            (error.status >= 500 && error.status <= 599)) {
+
+            console.log(`RETRY: ${url}`);
+
+            await sleep(1000);
+
+            return await fetchPage(url, cacheName, stats);
+        }
+
+        // Do not retry 403, 404, or other errors
+        throw error;
+    }
+}
+
+async function discoverBooks(stats) {
     let currentUrl = BASE_URL;
     let cataloguePage = 1;
 
@@ -77,24 +110,32 @@ async function discoverBooks() {
     const sourcePages = new Map();
 
     while (cataloguePage <= 3) {
-        const html = await fetchPage(
+
+        const html = await fetchWithRetry(
             currentUrl,
-            `catalogue-page-${cataloguePage}.html`
+            `catalogue-page-${cataloguePage}.html`,
+            stats
         );
 
         const $ = cheerio.load(html);
 
         $("article.product_pod h3 a").each((index, element) => {
+
             const href = $(element).attr("href");
 
             if (href) {
+
                 const absoluteUrl = new URL(
                     href,
                     currentUrl
                 ).href;
 
                 allBookUrls.push(absoluteUrl);
-                sourcePages.set(absoluteUrl, currentUrl);
+
+                sourcePages.set(
+                    absoluteUrl,
+                    currentUrl
+                );
             }
         });
 
@@ -127,6 +168,7 @@ async function discoverBooks() {
 }
 
 function normalizePrice(priceText) {
+
     if (!priceText) {
         return null;
     }
@@ -137,18 +179,27 @@ function normalizePrice(priceText) {
 
     const price = Number(cleaned);
 
-    return Number.isFinite(price) ? price : null;
+    return Number.isFinite(price)
+        ? price
+        : null;
 }
 
-async function extractBook(url, sourcePage, index) {
+async function extractBook(url, sourcePage, index, stats) {
+
     const cacheName = `book-${index + 1}.html`;
 
-    const html = await fetchPage(url, cacheName);
+    const html = await fetchWithRetry(
+        url,
+        cacheName,
+        stats
+    );
 
     const $ = cheerio.load(html);
 
     const title =
-        $("div.product_main h1").text().trim() || null;
+        $("div.product_main h1")
+            .text()
+            .trim() || null;
 
     const priceText =
         $("div.product_main .price_color")
@@ -156,7 +207,8 @@ async function extractBook(url, sourcePage, index) {
             .text()
             .trim() || null;
 
-    const priceGbp = normalizePrice(priceText);
+    const priceGbp =
+        normalizePrice(priceText);
 
     const availabilityText =
         $("div.product_main .availability")
@@ -190,39 +242,56 @@ async function extractBook(url, sourcePage, index) {
 }
 
 async function main() {
-    const { uniqueUrls, sourcePages } = await discoverBooks();
 
-    const records = [];
+    const startTime = new Date();
+
+    const stats = {
+        pagesFetched: 0,
+        cacheHits: 0
+    };
+
     const errors = [];
 
+    const {
+        uniqueUrls,
+        sourcePages
+    } = await discoverBooks(stats);
+
+
+    const records = [];
+
     for (let i = 0; i < uniqueUrls.length; i++) {
+
         const url = uniqueUrls[i];
 
         try {
+
             const record = await extractBook(
                 url,
-                sourcePages.get(url),
-                i
+                sourcePages.get(url) || BASE_URL,
+                i,
+                stats
             );
 
-            const result = bookSchema.safeParse(record);
+            const result =
+                bookSchema.safeParse(record);
 
             if (result.success) {
+
                 records.push(result.data);
+
             } else {
+
                 console.error(`INVALID: ${url}`);
 
                 errors.push({
-                    record,
+                    url,
                     errors: result.error.issues
                 });
             }
 
-            if (i < uniqueUrls.length - 1) {
-                await sleep(500);
-            }
-
         } catch (error) {
+
             console.error(
                 `FAILED: ${url} - ${error.message}`
             );
@@ -232,15 +301,19 @@ async function main() {
                 errors: [error.message]
             });
         }
+
+        if (i < uniqueUrls.length - 1) {
+            await sleep(500);
+        }
     }
 
-    const outputDir = path.join(
-        __dirname,
-        "..",
-        "output"
-    );
+    const outputDir =
+        path.join(__dirname, "..", "output");
 
-    fs.mkdirSync(outputDir, { recursive: true });
+    fs.mkdirSync(
+        outputDir,
+        { recursive: true }
+    );
 
     fs.writeFileSync(
         path.join(outputDir, "books.json"),
@@ -252,11 +325,40 @@ async function main() {
         JSON.stringify(errors, null, 2)
     );
 
-    console.log(`valid_records=${records.length}`);
-    console.log(`invalid_records=${errors.length}`);
+    const endTime = new Date();
+
+    const durationSeconds =
+        (endTime - startTime) / 1000;
+
+    const runReport = {
+        start_time: startTime.toISOString(),
+        duration_seconds: Number(
+            durationSeconds.toFixed(2)
+        ),
+        pages_fetched: stats.pagesFetched,
+        cache_hits: stats.cacheHits,
+        valid_records: records.length,
+        invalid_records: 0,
+        failed_pages: errors.length
+    };
+
+    fs.writeFileSync(
+        path.join(outputDir, "run-report.json"),
+        JSON.stringify(runReport, null, 2)
+    );
+
+    console.log("\nRUN REPORT");
+    console.log(
+        JSON.stringify(runReport, null, 2)
+    );
 }
 
 main().catch(error => {
-    console.error("ERROR:", error.message);
+
+    console.error(
+        "ERROR:",
+        error.message
+    );
+
     process.exit(1);
 });

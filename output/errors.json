@@ -1,1 +1,8 @@
-[]
+[
+  {
+    "url": "https://books.toscrape.com/catalogue/fake-book-for-testing/index.html",
+    "errors": [
+      "Fetch failed with status 404"
+    ]
+  }
+]
